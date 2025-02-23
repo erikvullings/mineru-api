@@ -22,7 +22,12 @@ docker image push erikvullings/mineru-api:gpu
 
 ## Test the API
 
-Replace `document.pdf` with your PDF file.
+You can use the [OpenAPI service](http://localhost:8000/docs), assuming you are using port 8000, which offers two services:
+
+- `/convert/zip`: which converts a PDF document and returns a ZIP file containing markdown and images.
+- `/convert/markdown`: which converts a PDF document and returns the markdown, optionally including images using base64 encoding.
+
+Or you can use `curl`, e.g. replace `document.pdf` with your PDF file and enter:
 
 ```bash
 curl -X POST "http://localhost:8000/convert/zip" \
