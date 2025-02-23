@@ -13,6 +13,13 @@ docker build -t mineru-api .
 docker run --rm --gpus all -p 8000:8000 mineru-api
 ```
 
+To publish it (optionally, log in first to the registry):
+
+```bash
+docker image tag mineru-api:latest erikvullings/mineru-api:gpu
+docker image push erikvullings/mineru-api:gpu
+```
+
 ## Test the API
 
 Replace `document.pdf` with your PDF file.
