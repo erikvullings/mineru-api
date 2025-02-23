@@ -1,7 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, FileResponse, Response, PlainTextResponse
 import shutil
 import os
+import os.path
 import tempfile
 from pathlib import Path
 import zipfile
@@ -14,12 +15,19 @@ from concurrent.futures import ProcessPoolExecutor
 from enum import Enum
 import traceback
 import torch
-
+import paddle
+import multiprocessing
 from magic_pdf.data.data_reader_writer import FileBasedDataWriter, FileBasedDataReader
 from magic_pdf.data.dataset import PymuDocDataset
 from magic_pdf.model.doc_analyze_by_custom_model import doc_analyze
 from magic_pdf.data.read_api import read_local_images, read_local_office
 from magic_pdf.config.enums import SupportedPdfParseMethod
+
+multiprocessing.set_start_method('spawn', force=True)
+
+# Set PyMU environment variables
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['FLAGS_fraction_of_gpu_memory_to_use'] = '0.8'
 
 # Configure logging
 logging.basicConfig(
@@ -39,6 +47,33 @@ class DocumentType(str, Enum):
     IMAGE = "image"
     OFFICE = "office"
 
+def check_cuda_setup():
+    """Check CUDA and CUDNN setup"""
+    try:
+        # Configure PaddlePaddle to use CUDA
+        paddle.device.set_device('gpu')
+        
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+            logger.info(f"CUDA version: {torch.version.cuda}")
+            logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
+            logger.info(f"Device name: {torch.cuda.get_device_name()}")
+        
+        # Check PaddlePaddle GPU support
+        logger.info(f"PaddlePaddle GPU available: {paddle.device.is_compiled_with_cuda()}")
+        logger.info(f"PaddlePaddle version: {paddle.__version__}")
+        logger.info(f"PaddlePaddle current device: {paddle.device.get_device()}")
+            
+    except Exception as e:
+        logger.error(f"Error checking CUDA setup: {str(e)}")
+        logger.error(traceback.format_exc())
+
+# Add this to your FastAPI startup events
+@app.on_event("startup")
+async def startup_event():
+    check_cuda_setup()
+    
 def get_document_type(filename: str) -> DocumentType:
     """Determine document type from file extension."""
     ext = filename.lower().split('.')[-1]
@@ -62,14 +97,13 @@ def process_document(
     try:
         logger.info(f"Starting conversion of {file_path} as {doc_type}")
         
-        # Force CPU usage
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        os.environ.pop("PYTORCH_ENABLE_MPS_FALLBACK", None)
-        os.environ["PYTORCH_MPS_ENABLE"] = "0"
-        
-        if hasattr(torch, 'mps'):
-            logger.info("MPS is available, but forcing CPU usage for stability")
-        
+        # Initialize CUDA after spawn
+        if torch.cuda.is_available():
+            torch.cuda.init()
+            logger.info(f"CUDA initialized in spawned process")
+            logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+            logger.info(f"Current device: {torch.cuda.current_device()}")
+
         # Setup output directories
         image_dir = os.path.join(output_dir, "images")
         os.makedirs(image_dir, exist_ok=True)
@@ -180,19 +214,25 @@ async def convert_document_zip(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Generate output ZIP filename from input filename
+    output_filename = os.path.splitext(file.filename)[0] + '.zip'
+    logger.debug(f"Output ZIP filename will be: {output_filename}")
+
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
             # Save uploaded file
             file_path = os.path.join(temp_dir, file.filename)
+            logger.debug(f"Saving uploaded file to {file_path}")
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             
             output_dir = os.path.join(temp_dir, "output")
             os.makedirs(output_dir, exist_ok=True)
+            logger.debug(f"Created output directory at {output_dir}")
             
-            # Process document in separate process
-            loop = asyncio.get_event_loop()
-            with ProcessPoolExecutor() as executor:
+            # Process document
+            with ProcessPoolExecutor(max_workers=1) as executor:
+                loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     executor,
                     process_document,
@@ -205,24 +245,49 @@ async def convert_document_zip(
             
             # Create ZIP file
             zip_path = os.path.join(temp_dir, "result.zip")
-            with zipfile.ZipFile(zip_path, "w") as zipf:
+            logger.debug(f"Creating ZIP file at {zip_path}")
+            
+            # Ensure the output directory has content before creating ZIP
+            if not os.path.exists(output_dir) or not os.listdir(output_dir):
+                raise Exception("No output files were generated during conversion")
+                
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
                 for root, _, files in os.walk(output_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, output_dir)
+                        logger.debug(f"Adding {file_path} to ZIP as {arcname}")
                         zipf.write(file_path, arcname)
             
-            logger.info("ZIP conversion completed successfully")
-            return FileResponse(
-                path=zip_path,
+            # Verify ZIP file exists and has content
+            if not os.path.exists(zip_path):
+                raise Exception("ZIP file was not created successfully")
+                
+            if os.path.getsize(zip_path) == 0:
+                raise Exception("Created ZIP file is empty")
+                
+            logger.info(f"ZIP conversion completed successfully. File size: {os.path.getsize(zip_path)} bytes")
+            
+            # Read the ZIP file into memory before returning
+            with open(zip_path, "rb") as zip_file:
+                zip_contents = zip_file.read()
+            
+            # Return ZIP file from memory
+            return Response(
+                content=zip_contents,
                 media_type="application/zip",
-                filename="converted_document.zip"
+                headers={
+                    "Content-Disposition": f"attachment; filename={output_filename}",
+                    "Content-Length": str(len(zip_contents))
+                }
             )
             
         except Exception as e:
             logger.error(f"Error in ZIP conversion: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+        
+        
 
 @app.post("/convert/markdown")
 async def convert_document_markdown(
@@ -252,9 +317,9 @@ async def convert_document_markdown(
             output_dir = os.path.join(temp_dir, "output")
             os.makedirs(output_dir, exist_ok=True)
             
-            # Process document in separate process
-            loop = asyncio.get_event_loop()
-            with ProcessPoolExecutor() as executor:
+            # Create a new ProcessPoolExecutor for each request
+            with ProcessPoolExecutor(max_workers=1) as executor:
+                loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     executor,
                     process_document,

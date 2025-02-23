@@ -1,8 +1,16 @@
-# Use the official Ubuntu base image
-FROM ubuntu:22.04
+# Change the base image to include CUDA runtime
+FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
 # Set environment variables to non-interactive to avoid prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Add CUDA and CUDNN paths
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+ENV CUDNN_PATH=/usr/lib/x86_64-linux-gnu/libcudnn.so.8
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
 
 # Update the package list and install necessary packages
 RUN apt-get update && \
@@ -21,6 +29,9 @@ RUN apt-get update && \
   libglib2.0-0 \
   && rm -rf /var/lib/apt/lists/*
 
+# Force update the ld cache
+RUN ldconfig
+
 # Set Python 3.10 as the default python3
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 
@@ -32,7 +43,7 @@ RUN /bin/bash -c "source /opt/mineru_venv/bin/activate && \
   pip3 install --no-cache-dir --upgrade pip && \
   wget https://github.com/opendatalab/MinerU/raw/master/docker/global/requirements.txt -O requirements.txt && \
   pip3 install --no-cache-dir --upgrade -r requirements.txt --extra-index-url https://wheels.myhloli.com && \
-  pip3 install --no-cache-dir --upgrade paddlepaddle"
+  pip3 install --no-cache-dir --upgrade paddlepaddle-gpu==3.0.0b1 -i https://www.paddlepaddle.org.cn/packages/stable/cu123/"
 
 # Copy the configuration file template and install magic-pdf latest
 RUN /bin/bash -c "wget https://github.com/opendatalab/MinerU/raw/master/magic-pdf.template.json && \
@@ -46,16 +57,16 @@ RUN /bin/bash -c "pip3 install --no-cache-dir --upgrade huggingface_hub && \
   python3 download_models.py && \
   sed -i 's|cpu|cuda|g' /root/magic-pdf.json"
 
-# Pre-download PaddleOCR models
-RUN mkdir -p /root/.paddleocr/whl/det/ch/ch_PP-OCRv4_det_infer && \
-  mkdir -p /root/.paddleocr/whl/rec/ch/ch_PP-OCRv4_rec_infer && \
-  mkdir -p /root/.paddleocr/whl/cls/ch_ppocr_mobile_v2.0_cls_infer && \
-  wget -O /root/.paddleocr/whl/det/ch/ch_PP-OCRv4_det_infer/ch_PP-OCRv4_det_infer.tar \
-  https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar && \
-  wget -O /root/.paddleocr/whl/rec/ch/ch_PP-OCRv4_rec_infer/ch_PP-OCRv4_rec_infer.tar \
-  https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_rec_infer.tar && \
-  wget -O /root/.paddleocr/whl/cls/ch_ppocr_mobile_v2.0_cls_infer/ch_ppocr_mobile_v2.0_cls_infer.tar \
-  https://paddleocr.bj.bcebos.com/dygraph_v2.0/ch/ch_ppocr_mobile_v2.0_cls_infer.tar
+# # Pre-download PaddleOCR models
+# RUN mkdir -p /root/.paddleocr/whl/det/ch/ch_PP-OCRv4_det_infer && \
+#   mkdir -p /root/.paddleocr/whl/rec/ch/ch_PP-OCRv4_rec_infer && \
+#   mkdir -p /root/.paddleocr/whl/cls/ch_ppocr_mobile_v2.0_cls_infer && \
+#   wget -O /root/.paddleocr/whl/det/ch/ch_PP-OCRv4_det_infer/ch_PP-OCRv4_det_infer.tar \
+#   https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar && \
+#   wget -O /root/.paddleocr/whl/rec/ch/ch_PP-OCRv4_rec_infer/ch_PP-OCRv4_rec_infer.tar \
+#   https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_rec_infer.tar && \
+#   wget -O /root/.paddleocr/whl/cls/ch_ppocr_mobile_v2.0_cls_infer/ch_ppocr_mobile_v2.0_cls_infer.tar \
+#   https://paddleocr.bj.bcebos.com/dygraph_v2.0/ch/ch_ppocr_mobile_v2.0_cls_infer.tar
 
 # Install FastAPI and dependencies
 RUN /bin/bash -c "source /opt/mineru_venv/bin/activate && \
